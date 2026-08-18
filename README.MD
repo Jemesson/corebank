@@ -18,36 +18,108 @@ Este repositório implementa o desafio proposto de System Design.
 - Maven 3.8+
 - Docker e Docker Compose
 
-## Arquitetura da aplicação
+## Arquitetura da Aplicação
 
 ```mermaid
-flowchart LR
-    Client([Clientes - 2M])
+flowchart TB
+    Client(["<b>Cliente</b><br/>2M contas ativas<br/>~90% leitura / ~10% escrita"])
 
-    subgraph Leitura["Leitura ~90% da carga"]
+    subgraph CoreBank["Sistema CoreBank"]
+        direction TB
+
+        subgraph App["Microsserviços do CoreBank"]
+            direction TB
+            
+            Command["<b>PixCommandController -> PixCommandService</b><br/>POST /api/pix/payment"]
+
+            Query["<b>PixQueryController -> PixQueryService</b><br/>GET /api/pix/:id/balance<br/>GET /api/pix/:id/statement?limit,offset<br/>"]
+            
+            Auth["<b>CardAuthorizationController -> CardAuthorizationService</b><br/>POST /api/card/authorization, /api/card/capture e /api/card/reversal"]
+            
+            Relay["<b>OutboxRelay</b><br/>Replicação agendada do Outbox para o Redis<br/>@Scheduled fixedDelay=300ms "]
+        end
+
+        Cache[("<b>Redis:6379</b><br/>Cache do Saldo com TTL 5s<br/>")]
+       
+        Primary[("<b>PostgreSQL 16 Primario</b> :5432<br/>accounts, pix_transactions, card_authorizations,<br/>idempotency_keys, outbox")]
+       
+        Replica[("<b>PostgreSQL 16 Replica</b> :5433 <br/>")]
+    end
+
+    Client -->|"GET Saldo e Extrato - ~90% do trafego"| Query
+    Client ==>|"POST PIX - ~10% do trafego"| Command
+    Client ==>|"POST Autorizacao de Cartão"| Auth
+
+    Query -->|"GET account_balance:id - Cache hit"| Cache
+    Query -->|"Consulta na Réplica - Cache miss"| Replica
+
+    Command ==>|"Persistir no Banco primário"| Primary
+    Auth ==>|"Utiliza a Primary para Autorização do cartão precisa ser precisa "| Primary
+
+    Relay -->|"2PhaseCommit para persistir na base primária e no Outbox (Atualização da Cache)"| Primary
+    Relay ==>|"Atualizar o Cache com o Saldo do AccountId com TTL 5s"| Cache
+
+    Primary -.->|"Replicação para atualizar a Réplica"| Replica
+    Cache -.->|"Cache miss ou Redis indisponivel:<br/>Consulta do saldo bate na Réplica"| Replica
+
+    classDef person fill:#08427B,stroke:#052E56,color:#FFFFFF
+    classDef container fill:#438DD5,stroke:#2E6295,color:#FFFFFF
+    classDef store fill:#2E7D5B,stroke:#1B5138,color:#FFFFFF
+    class Client person
+    class Query,Command,Auth,Relay container
+    class Cache,Primary,Replica store
+```
+
+### Componentes - Controller/Service/Repository
+
+```mermaid
+flowchart TB
+    subgraph API["API - Controllers"]
         QC[PixQueryController]
-        Cache[(Redis<br/>TTL 5s)]
-        Replica[(PostgreSQL<br/>replica)]
-    end
-
-    subgraph Escrita["Escrita ~10% da carga"]
         CC[PixCommandController]
-        Primary[(PostgreSQL<br/>primario)]
-    end
-
-    subgraph Cartao["Autorização de cartao"]
         AC[CardAuthorizationController]
+        GEH[GlobalExceptionHandler]
     end
 
-    Client --> QC & CC & AC
-    QC --> Cache
-    Cache -. cache miss .-> Replica
-    CC --> Primary
-    AC ==>|SELECT ... FOR UPDATE| Primary
-    Primary -.->|streaming replication| Replica
-    Primary --> Outbox[(outbox)]
-    Outbox --> Relay[OutboxRelay<br/>200ms]
-    Relay -->|write-through| Cache
+    subgraph SERVICE["Service"]
+        QS[PixQueryService]
+        CS[PixCommandService]
+        AS[CardAuthorizationService]
+    end
+
+    subgraph REPO["Repository"]
+        AQR[AccountQueryRepository]
+        PQR[PixQueryRepository]
+        AWR[AccountWriteRepository]
+        PWR[PixTransactionWriteRepository]
+        AR[AuthorizationRepository]
+    end
+
+    subgraph DATA["Infraestrutura"]
+        Redis[(Redis)]
+        Rep[(ReplicaDB)]
+        Pri[(PrimaryDB)]
+    end
+
+    subgraph SHARED["Cache e Idempotency/Outbox"]
+        IDEM[IdempotencyManagement]
+        BC[BalanceCached]
+        OW[OutboxWriter]
+        RL[OutboxRelay]
+    end
+
+    QC --> QS
+    CC --> CS
+    AC --> AS
+
+    QS --> BC & AQR & PQR
+    CS --> IDEM & AWR & PWR & OW
+    AS --> IDEM & AR & OW
+
+    BC --> Redis
+    RL --> BC
+    AQR & PQR --> Rep
+    AWR & PWR & AR & OW & IDEM & RL --> Pri
 ```
 
 ## Estrutura do código
@@ -89,7 +161,7 @@ docker exec corebank-postgres-replica psql -U postgres -d corebank \
   -c "SELECT pg_is_in_recovery();"
 ```
 
-## Rodando a aplicacao
+## Rodando a aplicação
 App disponível na porta 8080.
 ```bash
 mvn spring-boot:run
@@ -121,6 +193,7 @@ O HTML fica no `target/site/jacoco/index.html`:
 ```bash
 open target/site/jacoco/index.html
 ```
+![alt text](code-coverage.png)
 
 ## Endpoints
 
@@ -147,7 +220,7 @@ curl http://localhost:8080/api/pix/1001/balance
 curl 'http://localhost:8080/api/pix/1001/statement?limit=20&offset=0'
 ```
 
-### Autorizacao de Cartão:
+### Autorização de Cartão:
 
 ```bash
 curl -X POST http://localhost:8080/api/card/authorization \
@@ -172,13 +245,13 @@ curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/re
 | Valor inválido, campo faltando, header ausente | 400 | `VALIDATION_ERROR`, `MISSING_HEADER` |
 | Conta ou autorização inexistente | 404 | `NOT_FOUND` |
 | Chave de idempotência em processamento | 409 | `REQUEST_IN_PROGRESS` |
-| Autorização j´å capturada ou estornada | 409 | `INVALID_AUTHORIZATION_STATE` |
+| Autorização já capturada ou estornada | 409 | `INVALID_AUTHORIZATION_STATE` |
 | Saldo insuficiente para PIX | 422 | `INSUFFICIENT_BALANCE` |
 | Banco indisponível (retentavel) | 503 | `DATASTORE_UNAVAILABLE` |
 
 ## Configuração de TTL e Relay pro Redis
 
-| Propriedade | Padrao | Descrição |
+| Propriedade | Padrão | Descrição |
 |---|---|---|
 | `corebank.cache.balance-ttl` | `5s` | TTL do saldo. |
 | `corebank.outbox.poll-interval` | `300` | Intervalo de varredura do relay, em ms. |
@@ -189,8 +262,8 @@ curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/re
 ## Edge cases - Cenários do Banco e Redis
 
 **A leitura realmente usa a Réplica?** 
-Derrubando a réplica: saldo e extrato. Resposta com HTTP 503.
-Transações de PIX e autorização de cartão funcionam somente no banco primário.
+Derrubando a réplica: Saldo e Extrato. Resposta com HTTP 503.
+Transações de PIX e Autorização de cartão funcionam somente no banco primário.
 
 ```bash
 docker stop corebank-postgres-replica
