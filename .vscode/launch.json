@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "CoreBankApplication",
+      "request": "launch",
+      "mainClass": "com.corebank.CoreBankApplication",
+      "cwd": "${workspaceFolder}",
+      "vmArgs": "-Dspring.config.additional-location=file:./src/main/resources/"
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+# CoreBank
+
+Fintech de conta digital. Este repositório implementa a arquitetura proposta para resolver o gargalo de leitura de saldo descrito no cenário abaixo.
+
+## O problema
+
+- 2 milhoes de contas ativas.
+- Toda consulta ia direto ao PostgreSQL primario.
+- Banco com CPU em 90%.
+- Escritas (PIX, cartao) sao apenas 10% da carga, mas competiam pelos mesmos recursos.
+- **Requisito:** o saldo exibido pode ter ate 5 segundos de defasagem apos uma
+  transacao; a autorizacao de cartao precisa ser **precisa** (nao pode negar por
+  saldo errado).
+
+## Pre-requisitos
+
+- Java 21+
+- Maven 3.8+
+- Docker e Docker Compose
+
+## Arquitetura
+
+```mermaid
+flowchart LR
+    Client([Cliente])
+
+    subgraph Leitura["Leitura - ~90% da carga, consistencia eventual"]
+        QC[PixQueryController]
+        Cache[(Redis<br/>TTL 5s)]
+        Replica[(PostgreSQL<br/>replica)]
+    end
+
+    subgraph Escrita["Escrita - ~10% da carga, consistencia forte"]
+        CC[PixCommandController]
+        Primary[(PostgreSQL<br/>primario)]
+    end
+
+    subgraph Cartao["Autorizacao de cartao - precisa, sem cache"]
+        AC[CardAuthorizationController]
+    end
+
+    Client --> QC & CC & AC
+    QC --> Cache
+    Cache -. cache miss .-> Replica
+    CC --> Primary
+    AC ==>|SELECT ... FOR UPDATE| Primary
+    Primary -.->|streaming replication| Replica
+    Primary --> Outbox[(outbox)]
+    Outbox --> Relay[OutboxRelay<br/>200ms]
+    Relay -->|write-through| Cache
+```
+
+## Estrutura do código
+
+```
+src/main/java/com/corebank/
+├── command/            escrita de PIX (primario)
+├── query/              leitura de saldo e extrato (Redis -> replica)
+├── authorization/      autorizacao de cartao (primario, sob lock)
+├── outbox/             evento transacional e relay que atualiza o cache a cada x tempo.
+├── shared/
+│   ├── cache/          Contém a classe BalanceCached
+│   ├── idempotency/    IdempotencyGuard, compartilhado por PIX e cartao
+│   ├── exception/      excecoes lógicas
+│   └── api/            Global error handler.
+└── config/             Configs dos datasources primario e replica
+```
+
+## Subindo o ambiente
+
+```bash
+docker compose up -d
+```
+
+Sobem tres containers:
+
+| Container | Porta |
+|---|---|
+| `corebank-postgres-primary` | 5432 |
+| `corebank-postgres-replica` | 5433 |
+| `corebank-redis` | 6379 |
+
+
+```bash
+docker exec corebank-postgres-primary psql -U postgres -d corebank \
+  -c "SELECT application_name, state, sync_state, replay_lag FROM pg_stat_replication;"
+
+docker exec corebank-postgres-replica psql -U postgres -d corebank \
+  -c "SELECT pg_is_in_recovery();"
+```
+
+## Rodando a aplicacao
+App disponível na porta 8080.
+```bash
+mvn spring-boot:run
+```
+
+## Endpoints
+
+### Escrita - PIX
+
+```bash
+curl -X POST http://localhost:8080/api/pix/payment \
+  -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000' \
+  -H 'Content-Type: application/json' \
+  -d '{"originAccountId":1001,"targetPix":"joao@banco.com","value":250.00}'
+```
+
+```json
+{ "endToEndId": "E1787029754049...", "status": "COMPLETED" }
+```
+
+Repetir a chamada com a mesma `Idempotency-Key` devolve o mesmo `endToEndId` com
+status `REPLAYED`, sem debitar de novo.
+
+### Consulta o Saldo e Extrato
+
+```bash
+curl http://localhost:8080/api/pix/1001/balance
+curl 'http://localhost:8080/api/pix/1001/statement?limit=20&offset=0'
+```
+
+### Autorizacao de cartao:
+
+```bash
+curl -X POST http://localhost:8080/api/card/authorization \
+  -H 'Idempotency-Key: 7c9e6679-7425-40de-944b-e07fc1f90ae7' \
+  -H 'Content-Type: application/json' \
+  -d '{"accountId":1001,"amount":80.00,"merchant":"Restaurante"}'
+
+curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/capture
+
+curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/reversal
+```
+
+Aprovacao e recusa voltam **HTTP 200**: as duas sao decisoes validas de negocio. O adquirente precisa de uma decisao, nao de uma exceção.
+
+```json
+{ "authorizationCode": "AUT4581B911A3AF43EA", "status": "APPROVED",
+  "reason": null, "availableBalance": 20.00 }
+```
+
+## Codigos de resposta HTTP
+
+| Situacao | HTTP | Codigo |
+|---|---|---|
+| Valor invalido, campo faltando, header ausente | 400 | `VALIDATION_ERROR`, `MISSING_HEADER` |
+| Conta ou autorizacao inexistente | 404 | `NOT_FOUND` |
+| Chave de idempotencia em processamento | 409 | `REQUEST_IN_PROGRESS` |
+| Autorizacao ja capturada ou estornada | 409 | `INVALID_AUTHORIZATION_STATE` |
+| Saldo insuficiente para PIX | 422 | `INSUFFICIENT_BALANCE` |
+| Banco indisponivel (retentavel) | 503 | `DATASTORE_UNAVAILABLE` |
+
+## Configuração de TTL e Relay pro Redis
+
+| Propriedade | Padrao | Descrição |
+|---|---|---|
+| `corebank.cache.balance-ttl` | `5s` | TTL do saldo. |
+| `corebank.outbox.poll-interval` | `300` | Intervalo de varredura do relay, em ms. |
+| `corebank.outbox.batch-size` | `200` | Eventos por ciclo. |
+| `spring.datasource.primary.hikari.maximum-pool-size` | `20` | Pool do primario. |
+| `spring.datasource.replica.hikari.maximum-pool-size` | `40` | Pool da replica - maior, e onde mora a carga. |
+
+## Edge cases - Checando cenários (réplica e cache)
+
+**A leitura realmente usa a replica?** 
+Derrubando a replica: saldo e extrato. Passam a responder 503, enquanto PIX e autorização de cartão funcionam no banco primário.
+
+```bash
+docker stop corebank-postgres-replica
+docker exec corebank-redis redis-cli DEL account_balance:1001
+curl -i http://localhost:8080/api/pix/1001/balance          # 503
+curl -X POST http://localhost:8080/api/card/authorization \
+  -H 'Idempotency-Key: teste-1' -H 'Content-Type: application/json' \
+  -d '{"accountId":1001,"amount":10.00,"merchant":"Teste"}' # 200
+docker start corebank-postgres-replica
+```
+
+**Parando o Redis:**
+
+```bash
+docker stop corebank-redis
+curl http://localhost:8080/api/pix/1001/balance 
+docker start corebank-redis
+```
