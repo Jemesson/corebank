@@ -13,16 +13,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 
-/**
- * Separacao fisica de leitura e escrita.
- *
- * primary  -> toda escrita (PIX, autorizacao de cartao) e toda leitura que
- *             precisa ser exata. E o recurso escasso: fica com os 10% de carga
- *             de escrita mais a autorizacao de cartao.
- * replica  -> hot standby por streaming replication. Recebe o grosso da leitura
- *             (saldo em cache miss e extrato), que era o que estava fritando o
- *             primario a 90% de CPU.
- */
 @Configuration
 public class DataSourceConfig {
 
@@ -61,10 +51,6 @@ public class DataSourceConfig {
         return new DataSourceProperties();
     }
 
-    /**
-     * Pool marcado como read-only: qualquer escrita que vaze para este caminho
-     * falha explicitamente em vez de corromper dado silenciosamente.
-     */
     @Bean(name = "replicaDataSource")
     @ConfigurationProperties("spring.datasource.replica.hikari")
     public DataSource replicaDataSource() {

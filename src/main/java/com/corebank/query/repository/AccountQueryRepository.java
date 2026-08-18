@@ -7,11 +7,6 @@ import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
 
-/**
- * Le da REPLICA. Sem o @Qualifier explicito o Spring injetaria o JdbcTemplate
- * marcado como @Primary e toda a leitura voltaria para o banco primario - que e
- * exatamente o gargalo que a replica existe para resolver.
- */
 @Repository
 public class AccountQueryRepository {
 

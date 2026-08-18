@@ -17,18 +17,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.util.UUID;
 
-/**
- * Escrita de PIX. Roda inteira no primario, numa unica transacao:
- *
- *   1. reserva a chave de idempotencia
- *   2. trava a conta (SELECT ... FOR UPDATE)
- *   3. debita disponivel e total (PIX liquida na hora)
- *   4. registra a transacao
- *   5. grava o evento no outbox
- *   6. guarda a resposta na chave de idempotencia
- *
- * Tudo ou nada.
- */
 @Service
 public class PixCommandService {
 
@@ -73,7 +61,7 @@ public class PixCommandService {
 
         idempotency.complete(idempotencyKey, ENDPOINT, endToEndId);
 
-        log.info("PIX enviado: conta={} valor={} endToEndId={} saldoDisponivel={}",
+        log.info("PIX sent: account={} value={} endToEndId={} saldoDisponivel={}",
                 originAccountId, value, endToEndId, saved.getBalance());
 
         return PixPaymentResponse.completed(endToEndId);

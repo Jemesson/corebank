@@ -9,13 +9,6 @@ import org.springframework.data.relational.core.mapping.Table;
 
 import java.math.BigDecimal;
 
-/**
- * balance       = saldo disponivel (o que o cliente pode gastar agora)
- * totalBalance  = saldo total, incluindo o que esta preso em hold de cartao
- *
- * PIX liquida na hora e debita os dois. Autorizacao de cartao prende valor
- * apenas no disponivel; a captura e que baixa o total.
- */
 @Table("accounts")
 public class Account {
     @Id
@@ -38,7 +31,6 @@ public class Account {
     public BigDecimal getBalance() { return balance; }
     public Long getVersion() { return version; }
 
-    /** PIX enviado: liquidacao imediata, sai do disponivel e do total. */
     public void withdraw(BigDecimal value) {
         requirePositive(value);
         requireAvailable(value);
@@ -46,20 +38,17 @@ public class Account {
         this.totalBalance = this.totalBalance.subtract(value);
     }
 
-    /** Autorizacao de cartao: prende valor no disponivel, total segue intacto. */
     public void hold(BigDecimal value) {
         requirePositive(value);
         requireAvailable(value);
         this.balance = this.balance.subtract(value);
     }
 
-    /** Captura: o hold vira liquidacao, baixa o total. O disponivel ja foi debitado. */
     public void settleHold(BigDecimal value) {
         requirePositive(value);
         this.totalBalance = this.totalBalance.subtract(value);
     }
 
-    /** Estorno/expiracao do hold: devolve o valor ao disponivel. */
     public void releaseHold(BigDecimal value) {
         requirePositive(value);
         this.balance = this.balance.add(value);

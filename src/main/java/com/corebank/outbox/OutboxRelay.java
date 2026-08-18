@@ -16,11 +16,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Component
-/**
- * This class is responsible for relaying events from the outbox table to the cache.
- * It polls the outbox table for unprocessed events, processes them, and marks them as processed.
- * OutboxRelay
- */
 public class OutboxRelay {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);

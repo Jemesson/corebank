@@ -7,7 +7,6 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 
-/** Le da REPLICA. Extrato e a consulta mais pesada e nao precisa ser exata. */
 @Repository
 public class PixQueryRepository {
 

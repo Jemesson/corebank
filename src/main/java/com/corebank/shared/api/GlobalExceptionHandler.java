@@ -21,9 +21,6 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Controller Advice to handle HTTP exception errors
- */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -53,7 +50,6 @@ public class GlobalExceptionHandler {
                 .body(ApiError.of("INVALID_AUTHORIZATION_STATE", e.getMessage()));
     }
 
-    /** 409: o cliente pode tentar de novo em instantes com a MESMA chave. */
     @ExceptionHandler(DuplicateRequestInProgressException.class)
     public ResponseEntity<ApiError> handleDuplicateInProgress(DuplicateRequestInProgressException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT)

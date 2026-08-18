@@ -35,7 +35,9 @@ public class IdempotencyManagement {
                 SELECT response_ref FROM idempotency_keys WHERE key = ? AND endpoint = ?
                 """, String.class, key, endpoint);
 
-        var response = responses.stream().findFirst().orElse(null);
+        // Nao usar stream().findFirst(): response_ref e NULL enquanto a requisicao
+        // concorrente esta IN_PROGRESS, e Optional.of(null) estoura NullPointerException.
+        var response = responses.isEmpty() ? null : responses.get(0);
         if (response == null) {
             throw new DuplicateRequestInProgressException(key);
         }

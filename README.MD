@@ -1,16 +1,16 @@
 # CoreBank
 
-Fintech de conta digital. Este repositório implementa a arquitetura proposta para resolver o gargalo de leitura de saldo descrito no cenário abaixo.
+Fintech de conta digital.
+Este repositório implementa o desafio proposto de System Design.
 
-## O problema
+## Problemas
 
 - 2 milhoes de contas ativas.
 - Toda consulta ia direto ao PostgreSQL primario.
 - Banco com CPU em 90%.
 - Escritas (PIX, cartao) sao apenas 10% da carga, mas competiam pelos mesmos recursos.
 - **Requisito:** o saldo exibido pode ter ate 5 segundos de defasagem apos uma
-  transacao; a autorizacao de cartao precisa ser **precisa** (nao pode negar por
-  saldo errado).
+  transação; a autorização do cartão precisa ser **precisa** (nao pode negar por saldo errado).
 
 ## Pre-requisitos
 
@@ -18,24 +18,24 @@ Fintech de conta digital. Este repositório implementa a arquitetura proposta pa
 - Maven 3.8+
 - Docker e Docker Compose
 
-## Arquitetura
+## Arquitetura da aplicação
 
 ```mermaid
 flowchart LR
-    Client([Cliente])
+    Client([Clientes - 2M])
 
-    subgraph Leitura["Leitura - ~90% da carga, consistencia eventual"]
+    subgraph Leitura["Leitura ~90% da carga"]
         QC[PixQueryController]
         Cache[(Redis<br/>TTL 5s)]
         Replica[(PostgreSQL<br/>replica)]
     end
 
-    subgraph Escrita["Escrita - ~10% da carga, consistencia forte"]
+    subgraph Escrita["Escrita ~10% da carga"]
         CC[PixCommandController]
         Primary[(PostgreSQL<br/>primario)]
     end
 
-    subgraph Cartao["Autorizacao de cartao - precisa, sem cache"]
+    subgraph Cartao["Autorização de cartao"]
         AC[CardAuthorizationController]
     end
 
@@ -57,22 +57,22 @@ src/main/java/com/corebank/
 ├── command/            escrita de PIX (primario)
 ├── query/              leitura de saldo e extrato (Redis -> replica)
 ├── authorization/      autorizacao de cartao (primario, sob lock)
-├── outbox/             evento transacional e relay que atualiza o cache a cada x tempo.
+├── outbox/             evento transacional e atualiza o cache a cada x tempo.
 ├── shared/
-│   ├── cache/          Contém a classe BalanceCached
-│   ├── idempotency/    IdempotencyGuard, compartilhado por PIX e cartao
-│   ├── exception/      excecoes lógicas
-│   └── api/            Global error handler.
-└── config/             Configs dos datasources primario e replica
+│   ├── cache/          Classe de Cache - BalanceCached
+│   ├── idempotency/    Classe para lidar com a Idempotência
+│   ├── exception/      Exceções de negócio
+│   └── api/            HTTP error handler.
+└── config/             Configs dos datasources primário e sua réplica
 ```
 
-## Subindo o ambiente
+## Setup
 
 ```bash
 docker compose up -d
 ```
 
-Sobem tres containers:
+Subindo em três containers:
 
 | Container | Porta |
 |---|---|
@@ -93,6 +93,33 @@ docker exec corebank-postgres-replica psql -U postgres -d corebank \
 App disponível na porta 8080.
 ```bash
 mvn spring-boot:run
+```
+
+## Testes
+
+Os testes unitários usam mocks: não precisam dos containers do Postgres ou Redis no ar.
+
+```bash
+mvn test
+```
+
+```bash
+mvn -Dtest=AccountTest test                                     
+mvn -Dtest='AccountTest*#debitsAvailableAndTotalBalance' test
+```
+
+### Cobertura de código
+
+O JaCoCo utiliza o `mvn verify`. Portanto para gerar o report:
+
+```bash
+mvn verify
+```
+
+O HTML fica no `target/site/jacoco/index.html`:
+
+```bash
+open target/site/jacoco/index.html
 ```
 
 ## Endpoints
@@ -120,7 +147,7 @@ curl http://localhost:8080/api/pix/1001/balance
 curl 'http://localhost:8080/api/pix/1001/statement?limit=20&offset=0'
 ```
 
-### Autorizacao de cartao:
+### Autorizacao de Cartão:
 
 ```bash
 curl -X POST http://localhost:8080/api/card/authorization \
@@ -133,8 +160,6 @@ curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/ca
 curl -X POST http://localhost:8080/api/card/authorization/{authorizationCode}/reversal
 ```
 
-Aprovacao e recusa voltam **HTTP 200**: as duas sao decisoes validas de negocio. O adquirente precisa de uma decisao, nao de uma exceção.
-
 ```json
 { "authorizationCode": "AUT4581B911A3AF43EA", "status": "APPROVED",
   "reason": null, "availableBalance": 20.00 }
@@ -144,12 +169,12 @@ Aprovacao e recusa voltam **HTTP 200**: as duas sao decisoes validas de negocio.
 
 | Situacao | HTTP | Codigo |
 |---|---|---|
-| Valor invalido, campo faltando, header ausente | 400 | `VALIDATION_ERROR`, `MISSING_HEADER` |
-| Conta ou autorizacao inexistente | 404 | `NOT_FOUND` |
-| Chave de idempotencia em processamento | 409 | `REQUEST_IN_PROGRESS` |
-| Autorizacao ja capturada ou estornada | 409 | `INVALID_AUTHORIZATION_STATE` |
+| Valor inválido, campo faltando, header ausente | 400 | `VALIDATION_ERROR`, `MISSING_HEADER` |
+| Conta ou autorização inexistente | 404 | `NOT_FOUND` |
+| Chave de idempotência em processamento | 409 | `REQUEST_IN_PROGRESS` |
+| Autorização j´å capturada ou estornada | 409 | `INVALID_AUTHORIZATION_STATE` |
 | Saldo insuficiente para PIX | 422 | `INSUFFICIENT_BALANCE` |
-| Banco indisponivel (retentavel) | 503 | `DATASTORE_UNAVAILABLE` |
+| Banco indisponível (retentavel) | 503 | `DATASTORE_UNAVAILABLE` |
 
 ## Configuração de TTL e Relay pro Redis
 
@@ -161,10 +186,11 @@ Aprovacao e recusa voltam **HTTP 200**: as duas sao decisoes validas de negocio.
 | `spring.datasource.primary.hikari.maximum-pool-size` | `20` | Pool do primario. |
 | `spring.datasource.replica.hikari.maximum-pool-size` | `40` | Pool da replica - maior, e onde mora a carga. |
 
-## Edge cases - Checando cenários (réplica e cache)
+## Edge cases - Cenários do Banco e Redis
 
-**A leitura realmente usa a replica?** 
-Derrubando a replica: saldo e extrato. Passam a responder 503, enquanto PIX e autorização de cartão funcionam no banco primário.
+**A leitura realmente usa a Réplica?** 
+Derrubando a réplica: saldo e extrato. Resposta com HTTP 503.
+Transações de PIX e autorização de cartão funcionam somente no banco primário.
 
 ```bash
 docker stop corebank-postgres-replica
@@ -183,3 +209,4 @@ docker stop corebank-redis
 curl http://localhost:8080/api/pix/1001/balance 
 docker start corebank-redis
 ```
+# END

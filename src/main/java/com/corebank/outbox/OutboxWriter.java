@@ -19,10 +19,6 @@ public class OutboxWriter {
         this.objectMapper = objectMapper;
     }
 
-    /**
-     * Updates the outbox table when a balance updated event occurs.
-     * @param event
-     */
     public void balanceUpdated(BalanceUpdatedEvent event) {
         try {
             jdbcTemplate.update(
